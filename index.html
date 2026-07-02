@@ -113,7 +113,7 @@
   .page-head button svg{width:15px;height:15px}
 
   /* annotations */
-  .anno{position:absolute;cursor:default}
+  .anno{position:absolute;cursor:default;touch-action:none}
   .anno.text{
     min-width:12px;white-space:pre;line-height:1.25;outline:none;
     padding:1px 2px;border-radius:3px;
@@ -190,7 +190,7 @@
     position:fixed;bottom:44px;left:50%;transform:translateX(-50%) translateY(20px);
     background:#000;color:#fff;padding:11px 18px;border-radius:10px;font-size:13px;
     box-shadow:0 10px 30px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:.25s;z-index:100;
-    display:flex;align-items:center;gap:9px;
+    display:flex;align-items:center;gap:99px;
   }
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .toast .sp{width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
@@ -334,8 +334,6 @@
 <script>
 /* =========================================================================
    Inkline — Editor PDF native (pdf.js untuk render, pdf-lib untuk ekspor)
-   Semua koordinat anotasi disimpan dalam POINT PDF (top-down, ruang tak-terputar).
-   Rotasi halaman diterapkan via CSS pada pratinjau & setRotation() saat ekspor.
    ========================================================================= */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -431,7 +429,6 @@ async function renderPage(p){
   page.style.transform=`rotate(${rot}deg)`;
   page._pageId=p.id; page._rotation=rot; page._w=wPx; page._h=hPx;
 
-  // base canvas (pdf render atau putih untuk halaman kosong)
   const base=document.createElement('canvas');
   base.className='pdf-canvas'; base.width=Math.round(wPx); base.height=Math.round(hPx);
   base.style.width=wPx+'px'; base.style.height=hPx+'px';
@@ -444,22 +441,18 @@ async function renderPage(p){
   }
   page.appendChild(base);
 
-  // draw canvas (pena + stabilo)
   const dcv=document.createElement('canvas');
   dcv.className='draw-canvas'; dcv.width=Math.round(wPx); dcv.height=Math.round(hPx);
   dcv.style.width=wPx+'px'; dcv.style.height=hPx+'px';
   page.appendChild(dcv);
   drawStrokes(dcv,p);
 
-  // annotation layer (teks + gambar)
   const layer=document.createElement('div'); layer.className='anno-layer';
   page.appendChild(layer);
   annosOf(p.id).forEach(a=>{ if(a.type==='text'||a.type==='image') layer.appendChild(buildAnnoEl(a,p)); });
 
-  // per-page header
   page.appendChild(buildPageHead(p));
 
-  // interactions
   attachPageEvents(page,p,dcv,layer);
 
   slot.appendChild(page);
@@ -542,16 +535,16 @@ function addBlankPage(){
   setTimeout(()=>workspace.scrollTo({top:workspace.scrollHeight,behavior:'smooth'}),50);
 }
 
-/* ---------- coordinate mapping (client -> point, ruang tak-terputar) ---------- */
+/* ---------- coordinate mapping ---------- */
 function clientToPt(page,ev){
   const base=page.querySelector('.pdf-canvas');
-  const rect=base.getBoundingClientRect();          // bounding box terputar di layar
+  const rect=base.getBoundingClientRect();
   const cx=rect.left+rect.width/2, cy=rect.top+rect.height/2;
   const dx=ev.clientX-cx, dy=ev.clientY-cy;
   const r=page._rotation*Math.PI/180, cos=Math.cos(r), sin=Math.sin(r);
-  const lx= dx*cos + dy*sin;                          // invers rotasi CSS
+  const lx= dx*cos + dy*sin;
   const ly=-dx*sin + dy*cos;
-  const localX=lx+page._w/2, localY=ly+page._h/2;     // px lokal tak-terputar
+  const localX=lx+page._w/2, localY=ly+page._h/2;
   return {localX, localY, xpt:localX/state.scale, ypt:localY/state.scale};
 }
 
@@ -590,7 +583,6 @@ function attachPageEvents(page,p,dcv,layer){
     }
   });
 
-  // live coordinate readout
   page.addEventListener('pointermove',e=>{
     const {xpt,ypt}=clientToPt(page,e);
     $('#stCoord').textContent=`x ${Math.max(0,Math.round(xpt))} · y ${Math.max(0,Math.round(ypt))} pt`;
@@ -628,14 +620,17 @@ function eraseStrokeAt(p,pt){
 }
 
 /* ---------- text ---------- */
-function addText(p,xpt,ypt){
+async function addText(p,xpt,ypt){
   snapshot();
   const a={id:nextId(),pageId:p.id,type:'text',x:xpt,y:ypt,text:'',size:state.fontSize,color:state.color};
-  state.annotations.push(a); renderAll(); updateMeta();
+  state.annotations.push(a); 
+  await renderAll(); // DIUBAH: Ditambahkan `await` agar elemen ter-render dulu di DOM sebelum dicari
+  updateMeta();
   const el=doc.querySelector(`.anno[data-id="${a.id}"]`);
-  editText(el,a);
+  if(el) editText(el,a);
 }
 function editText(el,a){
+  if(!el) return;
   selectAnno(a.id);
   el.setAttribute('contenteditable','true'); el.focus();
   const range=document.createRange(); range.selectNodeContents(el);
@@ -666,6 +661,7 @@ function placeImage(p,xpt,ypt){
 function startDrag(e,el,p,page){
   e.preventDefault();
   const a=state.annotations.find(x=>x.id===el.dataset.id); if(!a)return;
+  el.setPointerCapture(e.pointerId); // DIUBAH: Mengunci pointer agar fungsi seret stabil
   const start=clientToPt(page,e); const ox=a.x, oy=a.y; let moved=false; let snapped=false;
   const move=ev=>{
     const c=clientToPt(page,ev);
@@ -673,19 +669,29 @@ function startDrag(e,el,p,page){
     a.x=ox+(c.xpt-start.xpt); a.y=oy+(c.ypt-start.ypt); moved=true;
     el.style.left=(a.x*state.scale)+'px'; el.style.top=(a.y*state.scale)+'px';
   };
-  const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);if(!moved&&snapped)state.history.pop();};
+  const up=()=>{
+    el.releasePointerCapture(e.pointerId);
+    window.removeEventListener('pointermove',move);
+    window.removeEventListener('pointerup',up);
+    if(!moved&&snapped)state.history.pop();
+  };
   window.addEventListener('pointermove',move); window.addEventListener('pointerup',up);
 }
 function startResize(e,el,p,page){
   e.preventDefault(); e.stopPropagation();
   const a=state.annotations.find(x=>x.id===el.dataset.id); if(!a||a.type!=='image')return;
+  el.setPointerCapture(e.pointerId); // DIUBAH: Mengunci pointer agar ubah ukuran stabil
   const start=clientToPt(page,e); const ow=a.w, oh=a.h, ratio=oh/ow; snapshot();
   const move=ev=>{
     const c=clientToPt(page,ev);
     let nw=Math.max(20,ow+(c.xpt-start.xpt)); a.w=nw; a.h=nw*ratio;
     el.style.width=(a.w*state.scale)+'px'; el.style.height=(a.h*state.scale)+'px';
   };
-  const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);};
+  const up=()=>{
+    el.releasePointerCapture(e.pointerId);
+    window.removeEventListener('pointermove',move);
+    window.removeEventListener('pointerup',up);
+  };
   window.addEventListener('pointermove',move); window.addEventListener('pointerup',up);
 }
 
@@ -901,7 +907,7 @@ window.addEventListener('resize',()=>{ if(state.pages.length) $('#zoomVal').text
 // double-click text to edit
 doc.addEventListener('dblclick',e=>{
   const el=e.target.closest('.anno.text'); if(!el)return;
-  const a=state.annotations.find(x=>x.id===el.dataset.id); if(a)editText(el,a);
+  const a=state.annotations.find(x=>x.id===el.dataset.id); if(a) editText(el,a);
 });
 
 renderInspector();
